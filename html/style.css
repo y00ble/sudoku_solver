@@ -1,0 +1,237 @@
+.cell {
+    border-style: solid;
+    border-width: 1px;
+    box-sizing: border-box;
+    display: inline-block;
+    height: 100%;
+    width: 11.111%;
+    overflow: hidden;
+}
+
+.cell_color {
+    left: -20%;
+    right: -20%;
+    height: 140%;
+    width: 140%;
+}
+
+.board {
+    height: 0;
+    width: 65%;
+    overflow: hidden;
+    position: relative;
+    padding-top: 65%;
+    display: inline-block;
+}
+
+.grid {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.row {
+    height: 11.111%;
+    display: flex;
+}
+
+.controls_container {
+    display: inline-block;
+    width: 35%;
+    padding-top: 65%;
+    top: 0;
+    position: absolute;
+}
+
+.controls_row {
+    display: flex;
+    margin: auto;
+}
+
+.control_button {
+    width: 60px;
+    min-width: 60px;
+    height: 60px;
+    display: inline-block;
+    margin: 4px;
+    border-radius: 8px;
+    background-color: rgb(172, 0, 172);
+    text-align: center;
+    color: white;
+    line-height: 60px;
+    font-size: 36px;
+}
+
+.delete_button {
+    width: 128px;
+    min-width: 60px;
+    height: 60px;
+    display: inline-block;
+    margin: 4px;
+    border-radius: 8px;
+    background-color: rgb(172, 0, 172);
+    text-align: center;
+    color: white;
+    line-height: 60px;
+    font-size: 36px;
+}
+
+.center_button {
+    font-size: 20px;
+}
+
+.corner_button {
+    font-size: 20px;
+    text-align: left;
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    padding: 10px;
+    line-height: 10px;
+}
+
+.controls {
+    margin: 0;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    -ms-transform: translate(-50%, -50%);
+    transform: translate(-50%, -50%);
+}
+
+.color_icon {
+    height:20px;
+    width: 20px;
+    position: absolute;
+}
+
+.color_icon_1 {
+    background-color: red;
+    top: 15px;
+    left: 15px;
+}
+
+.color_icon_2 {
+    background-color: blue;
+    top: 20px;
+    left: 20px;
+}
+
+.color_icon_3 {
+    background-color: green;
+    top: 25px;
+    left: 25px;
+}
+
+.mode_button {
+    margin-left: 10px;
+}
+
+.selected {
+    background-color: rgb(253, 255, 160);
+}
+
+.cell_mark {
+    display: inline-block;
+    max-width: 100%;
+    /* And then, position it at will */
+    top: 0;
+    left: 0;
+    margin: 0;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+
+.mark_wrapper {
+    width: 100%;
+    height: 100%;
+    float: left;
+    position: relative;
+}
+
+.definite {
+    font-size: 36px;
+    text-align: center;
+}
+
+.centre_pencil {
+    font-size: 18px;
+    text-align: center;
+}
+
+.corner_pencil {
+    font-size: 16px;
+    display: inline-block;
+    position: absolute;
+}
+
+.top_left_corner {
+    top: 0%;
+    left: 0%;
+    transform: translate(0%, 0%);
+}
+
+.top_corner {
+    top: 0%;
+    left: 50%;
+    transform: translate(-50%, 0%);
+}
+
+.top_right_corner {
+    top: 0%;
+    left: 100%;
+    transform: translate(-100%, 0%);
+}
+
+.left_corner {
+    top: 50%;
+    left: 0%;
+    transform: translate(0%, -50%);
+}
+
+.right_corner {
+    top: 50%;
+    left: 100%;
+    transform: translate(-100%, -50%);
+}
+
+.bottom_left_corner {
+    top: 100%;
+    left: 0%;
+    transform: translate(0%, -100%);
+}
+
+.bottom_corner {
+    top: 100%;
+    left: 50%;
+    transform: translate(-50%, -100%);
+}
+
+.bottom_right_corner {
+    top: 100%;
+    left: 100%;
+    transform: translate(-100%, -100%);
+}
+
+.weird_corner {
+    top: 75%;
+    left: 75%;
+}
+
+.selected_mode_button {
+    background-color: rgb(179, 79, 179);
+}
+
+.color_swatch {
+    top: -80%;
+    left: 20%;
+    width: 60%;
+    height: 60%;
+    position: relative;
+    display: none;
+}
