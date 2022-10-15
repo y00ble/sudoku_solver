@@ -5,10 +5,13 @@ import itertools
 import numpy as np
 import networkx as nx
 import sys
+from traceback import format_exc
 import uuid
 
+from tqdm import tqdm as tq
+
 ALL_POSSIBLE_ASSIGNMENTS_LIMIT = 1e5 + 1
-BIFURCATION_LIMIT = 1e7
+BIFURCATION_LIMIT = 1e5
 N_TUPLE_NAMES = {
     1: "single",
     2: "pair",
@@ -28,6 +31,7 @@ def print_msg(msg, indent_override=None):
         print(
             "  " * (msg_indent if indent_override is None else indent_override) + line
         )
+
     sys.stdout.flush()
 
 
@@ -101,58 +105,72 @@ class Board:
         self.process_constraint_queue()
 
     def process_constraint_queue(self, constraint_limit=None, on_bifurcation=False):
-        constraints_processed = 0
-        last_changed = 0
-        constraints_count = 0
-        while self.unfinalised_cells:
-            while self.constraints_to_check:
-                start_snapshot = self.snapshot()
-                constraint = self.constraints_to_check.popleft()
-                constraint.check()
-                board_changed = self.snapshot() != start_snapshot
+        with tq(total=self.total_possibles, disable=True) as bar:
+            constraints_processed = 0
+            last_changed = 0
+            constraints_count = 0
+            while self.unfinalised_cells:
+                while self.constraints_to_check:
+                    start_snapshot = self.snapshot()
+                    constraint = self.constraints_to_check.popleft()
+                    constraint.check()
+                    end_snapshot = self.snapshot()
+                    board_changed = end_snapshot != start_snapshot
 
-                if board_changed:
-                    last_changed = constraints_count
-                else:
-                    if constraints_count - last_changed > len(self.constraints):
-                        break
-                constraints_count += 1
-
-                if constraint_limit is not None:
                     if board_changed:
-                        constraints_processed += 1
-                        if (
-                            not (constraint_limit is None)
-                            and constraints_processed > constraint_limit
-                        ):
-                            print_msg(
-                                "No contradiction or solution discovered within {} deductions".format(
-                                    constraint_limit
+                        bar.update(
+                            sum([len(cell) for cell in start_snapshot])
+                            - sum([len(cell) for cell in end_snapshot])
+                        )
+                        last_changed = constraints_count
+                    else:
+                        if constraints_count - last_changed > len(self.constraints):
+                            break
+                    constraints_count += 1
+
+                    if constraint_limit is not None:
+                        if board_changed:
+                            constraints_processed += 1
+                            if (
+                                not (constraint_limit is None)
+                                and constraints_processed > constraint_limit
+                            ):
+                                print_msg(
+                                    "No contradiction or solution discovered within {} deductions".format(
+                                        constraint_limit
+                                    )
                                 )
-                            )
+                                break
+
+                if not self.unfinalised_cells:
+                    break
+
+                if not on_bifurcation:
+                    while self.unbifurcated_cells:
+                        bifurcation_successful = self.bifurcate()
+                        if bifurcation_successful:
                             break
 
-            if not self.unfinalised_cells:
-                break
+                    if (not self.unbifurcated_cells) and (
+                        not self.end_after_bifurcation
+                    ):
+                        self.unbifurcated_cells = {
+                            cell for cell in self.cells if not cell.finalised
+                        }
+                        self.constraints_to_check.extend(self.constraints)
+                        self.end_after_bifurcation = True
 
-            if not on_bifurcation:
-                while self.unbifurcated_cells:
-                    bifurcation_successful = self.bifurcate()
-                    if bifurcation_successful:
-                        break
+                if not self.constraints_to_check:
+                    raise NoSolutionFound("No solution could be found!")
 
-                if (not self.unbifurcated_cells) and (not self.end_after_bifurcation):
-                    self.unbifurcated_cells = {
-                        cell for cell in self.cells if not cell.finalised
-                    }
-                    self.constraints_to_check.extend(self.constraints)
-                    self.end_after_bifurcation = True
-
-            if not self.constraints_to_check:
+            if self.unfinalised_cells:
                 raise NoSolutionFound("No solution could be found!")
 
-        if self.unfinalised_cells:
-            raise NoSolutionFound("No solution could be found!")
+            self.final_constraint_check()
+
+    @property
+    def total_possibles(self):
+        return sum([len(cell.possibles) for cell in self.cells])
 
     def add_solution_snapshot(self, board):
         snapshot = board.snapshot()
@@ -167,8 +185,12 @@ class Board:
                 )
             )
 
+    def final_constraint_check(self):
+        for constraint in self.constraints:
+            constraint.check()
+
     def snapshot(self):
-        return tuple([cell.snapshot_possibles() for cell in self.cells])
+        return self.__repr__()
 
     def bifurcate(self):
         _stdout = sys.stdout
@@ -219,6 +241,7 @@ class Board:
                 new_board.process_constraint_queue(
                     constraint_limit=BIFURCATION_LIMIT, on_bifurcation=True
                 )
+                self.final_constraint_check()
                 self.add_solution_snapshot(new_board)
                 sys.stdout = bifurcation_stdout
                 print(possible_stdout.getvalue())
@@ -231,7 +254,6 @@ class Board:
                     ),
                     indent_override=0,
                 )
-                print(new_board)
                 to_remove.add(possible)
                 sys.stdout = bifurcation_stdout
                 print(possible_stdout.getvalue())
@@ -315,25 +337,33 @@ class Constraint:
 
     def check(self):
         start_snapshot = self.snapshot_possibles()
-        self.process_check()
-        if hasattr(self, "quick_update"):
-            self.quick_update()
-        end_snapshot = self.snapshot_possibles()
+        try:
+            if hasattr(self, "quick_update"):
+                self.quick_update()
 
-        # print(
-        #     "Checking {} (Queue size {})".format(
-        #         self.name, len(self.board.constraints_to_check)
-        #     )
-        # )
-        if start_snapshot != end_snapshot:
-            # print("Change detected")
-            for cell, cell_start_snapshot, cell_end_snapshot in zip(
-                self.cells, start_snapshot, end_snapshot
-            ):
-                if cell_end_snapshot != cell_start_snapshot:
-                    self.board.constraints_to_check.extend(cell.constraints)
-            return True
-        return False
+            self.process_check()
+
+            end_snapshot = self.snapshot_possibles()
+
+            # print(
+            #     "Checking {} (Queue size {})".format(
+            #         self.name, len(self.board.constraints_to_check)
+            #     )
+            # )
+            if start_snapshot != end_snapshot:
+                print_msg("Change detected checking {}".format(self.name))
+                for cell, cell_start_snapshot, cell_end_snapshot in zip(
+                    self.cells, start_snapshot, end_snapshot
+                ):
+                    if cell_end_snapshot != cell_start_snapshot:
+                        self.board.constraints_to_check.extend(cell.constraints)
+                return True
+            return False
+        except Exception as e:
+            print_msg(
+                "Exception raised checking {}:\n\n {}".format(self.name, format_exc())
+            )
+            raise e
 
     def process_check(self):
         self.update_possibles()
@@ -360,8 +390,14 @@ class Constraint:
         all_possible_assignments = []
 
         def recurse_assignments(current_assignment={}):
+
+            possible_pivots = [
+                cell for cell in self.cells if cell not in current_assignment
+            ]
+            if len(possible_pivots) == 0:
+                return
             pivot_cell = min(
-                (cell for cell in self.cells if cell not in current_assignment),
+                possible_pivots,
                 key=lambda cell: len(cell.possibles),
             )
 
@@ -490,7 +526,17 @@ class NoRepeatsConstraint(Constraint):
                 start_snapshot = self.snapshot_possibles()
                 for cell in self.cells:
                     if cell not in combination:
-                        cell.remove_possibles(all_possibles)
+                        try:
+                            cell.remove_possibles(all_possibles)
+                        except Exception as e:
+                            print_msg(
+                                "{} {} found in {}".format(
+                                    "".join(map(str, sorted(all_possibles))),
+                                    N_TUPLE_NAMES[n],
+                                    self.name,
+                                )
+                            )
+                            raise e
 
                 if self.snapshot_possibles() != start_snapshot:
                     if len(complement_combination) > 1:

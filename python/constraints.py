@@ -1,3 +1,4 @@
+import itertools
 from sudoku import Constraint, NoRepeatsConstraint
 
 
@@ -29,6 +30,11 @@ class CellsEqual(Constraint):
         if super().partial_assignment_invalid(assignment):
             return True
         return len(set(assignment.values())) != 1
+
+    def quick_update(self):
+        possibles = set.intersection(*[cell.possibles for cell in self.cells])
+        for cell in self.cells:
+            cell.possibles = {i for i in possibles}
 
 
 class DisjointGroup(NoRepeatsConstraint):
@@ -208,3 +214,274 @@ class BrokenThermometer(Constraint):
                 if break_count != 1:
                     return True
             return False
+
+
+class BlackKropki(NoRepeatsConstraint):
+    def __init__(self, board, cell_1, cell_2):
+        super().__init__(board, [cell_1, cell_2])
+        self.name = "Black Kropki {} {}".format(cell_1, cell_2)
+
+    def partial_assignment_invalid(self, assignment):
+        if super().partial_assignment_invalid(assignment):
+            return True
+        if self.cells[0] in assignment and self.cells[1] in assignment:
+            return min(assignment.values()) * 2 != max(assignment.values())
+
+
+class Palindrome(Constraint):
+    def __init__(self, board, cells):
+        super().__init__(board, cells)
+        self.name = "Palindrome {}".format(self.cells)
+
+    def get_inverse_cell(self, cell):
+        this_cell_index = self.cells.index(cell)
+        return self.cells[-(this_cell_index + 1)]
+
+    def partial_assignment_invalid(self, assignment):
+        if super().partial_assignment_invalid(assignment):
+            return True
+        for cell in assignment:
+            inverse_cell = self.get_inverse_cell(cell)
+            if inverse_cell in assignment:
+                if assignment[cell] != assignment[inverse_cell]:
+                    return True
+
+
+class Skyscraper(Constraint):
+    def __init__(self, board, side, index, value):
+        """
+        Side must be one of ["top", "bottom", "left" or "right"]
+        """
+        if side in {"top", "bottom"}:
+            cells = [cell for cell in board.cells if cell.column == index]
+
+        if side in {"left", "right"}:
+            cells = [cell for cell in board.cells if cell.row == index]
+
+        if side in {"bottom", "right"}:
+            cells = list(reversed(cells))
+
+        self.value = value
+        self.name = "{} skyscraper {} {}".format(self.value, side, index)
+        super().__init__(board, cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if super().partial_assignment_invalid(assignment):
+            return True
+
+        visible_height = 0
+        unassigned_cells_seen = 0
+        assigned_visible_cells_seen = 0
+
+        for cell in self.cells:
+            if cell in assignment:
+                if assignment[cell] > visible_height:
+                    visible_height = assignment[cell]
+                    assigned_visible_cells_seen += 1
+                    if (
+                        (9 - visible_height)
+                        + assigned_visible_cells_seen
+                        + unassigned_cells_seen
+                        < self.value
+                    ):
+                        return True
+                    if assigned_visible_cells_seen > self.value:
+                        return True
+            else:
+                unassigned_cells_seen += 1
+
+
+class X(KillerCage):
+    def __init__(self, board, cell_1, cell_2):
+        super().__init__(board, [cell_1, cell_2], 10)
+        self.name = "X ({}, {})".format(cell_1, cell_2)
+
+
+class V(KillerCage):
+    def __init__(self, board, cell_1, cell_2):
+        super().__init__(board, [cell_1, cell_2], 5)
+        self.name = "V ({}, {})".format(cell_1, cell_2)
+
+
+class XI(KillerCage):
+    def __init__(self, board, cell_1, cell_2):
+        super().__init__(board, [cell_1, cell_2], 11)
+        self.name = "XI ({}, {})".format(cell_1, cell_2)
+
+
+class IX(KillerCage):
+    def __init__(self, board, cell_1, cell_2):
+        super().__init__(board, [cell_1, cell_2], 9)
+        self.name = "IX ({}, {})".format(cell_1, cell_2)
+
+
+class LiarSumConstraint(Constraint):
+    def __init__(self, board, c1, c2, avoid_sum):
+        super().__init__(board, [c1, c2])
+        self.avoid_sum = avoid_sum
+        self.name = "{} + {} != {}".format(c1, c2, avoid_sum)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) == len(self.cells):
+            return sum(assignment.values()) == self.avoid_sum
+
+
+class NegativeSumConstraint:
+    def __init__(self, board, avoid_sum):
+        positive_pairs = set()
+        for constraint in board.constraints:
+            if isinstance(constraint, KillerCage):
+                if len(constraint.cells) == 2 and constraint.total == avoid_sum:
+                    c1, c2 = constraint.cells
+                    positive_pairs.add((c1, c2))
+                    positive_pairs.add((c2, c1))
+
+        for row, col in itertools.product([1, 2, 3, 4, 5, 6, 7, 8, 9], repeat=2):
+            c1 = board[row, col]
+            if row < 9:
+                c2 = board[row + 1, col]
+                if (c1, c2) not in positive_pairs:
+                    LiarSumConstraint(board, c1, c2, avoid_sum)
+
+            if col < 9:
+                c2 = board[row, col + 1]
+                if (c1, c2) not in positive_pairs:
+                    LiarSumConstraint(board, c1, c2, avoid_sum)
+
+
+class InternalSkyscraperConstraint(Constraint):
+    def __init__(self, board, visibility_cell, cells):
+        super().__init__(board, cells + [visibility_cell])
+        self.skyscraper_cells = sorted(
+            cells,
+            key=lambda c: abs(c.row - visibility_cell.row)
+            + abs(c.column - visibility_cell.column),
+        )
+        self.visibility_cell = visibility_cell
+        self.name = "Skyscraper {}: {}".format(
+            self.visibility_cell, self.skyscraper_cells
+        )
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        should_be_visible = assignment[self.visibility_cell]
+
+        current_height = 0
+        are_visible = 0
+        for cell in self.skyscraper_cells:
+            value = assignment[cell]
+            if value > current_height:
+                are_visible += 1
+                current_height = value
+
+        return should_be_visible != are_visible
+
+    def quick_update(self):
+        self.visibility_cell.possibles = self.visibility_cell.possibles.intersection(
+            {i + 1 for i, _ in enumerate(self.skyscraper_cells)}
+        )
+
+
+class InternalSandwichConstraint(Constraint):
+    def __init__(self, board, sum_cell, sandwich_cells):
+        super().__init__(board, [sum_cell] + sandwich_cells)
+        self.sum_cell = sum_cell
+        self.sandwich_cells = sorted(
+            sandwich_cells, key=lambda cell: cell.row + cell.column
+        )
+        self.name = "Sandwich {}: {}".format(self.sum_cell, self.sandwich_cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        if 1 not in assignment.values() or 9 not in assignment.values():
+            return True
+
+        in_sandwich = False
+        current_sum = 0
+        for cell in self.sandwich_cells:
+            value = assignment[cell]
+            if not in_sandwich and value in {1, 9}:
+                in_sandwich = True
+            elif in_sandwich and value not in {1, 9}:
+                current_sum += value
+            elif in_sandwich and value in {1, 9}:
+                return current_sum != assignment[self.sum_cell]
+
+
+class InternalXSumConstraint(Constraint):
+    def __init__(self, board, sum_cell, summand_cells):
+        super().__init__(board, [sum_cell] + summand_cells)
+        self.sum_cell = sum_cell
+        self.summand_cells = sorted(
+            summand_cells,
+            key=lambda c: abs(c.row - sum_cell.row) + abs(c.column - sum_cell.column),
+        )
+        self.x_cell = self.summand_cells[0]
+        self.name = "X-sum {}: {}".format(self.sum_cell, self.summand_cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        current_sum = 0
+        for cell in self.summand_cells[: assignment[self.x_cell]]:
+            current_sum += assignment[cell]
+
+        return current_sum != assignment[self.sum_cell]
+
+    def quick_update(self):
+        self.x_cell.possibles = self.x_cell.possibles.intersection({2, 3})
+
+
+class InternalConsecutiveConstraint(Constraint):
+    def __init__(self, board, count_cell, subject_cells):
+        super().__init__(board, [count_cell] + subject_cells)
+        self.count_cell = count_cell
+        self.subject_cells = sorted(
+            subject_cells,
+            key=lambda c: abs(c.row - count_cell.row)
+            + abs(c.column - count_cell.column),
+        )
+        self.name = "Consecutive {}: {}".format(self.count_cell, self.subject_cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        max_run = 0
+        current_run = 0
+        previous_cell_value = None
+        for cell in self.subject_cells:
+            if (
+                previous_cell_value is None
+                or abs(assignment[cell] - previous_cell_value) == 1
+            ):
+                current_run += 1
+                if current_run > max_run:
+                    max_run = current_run
+            else:
+                current_run = 1
+            previous_cell_value = assignment[cell]
+
+        return max_run != assignment[self.count_cell]
+
+    def quick_update(self):
+        self.count_cell.possibles = self.count_cell.possibles.intersection(
+            {i + 1 for i, _ in enumerate(self.subject_cells)}
+        )
