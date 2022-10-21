@@ -81,8 +81,14 @@ class Board:
         output = ""
         max_possibles = max([len(cell.possibles) for cell in self.cells])
         for i, cell in enumerate(self.cells):
-            if i % 9 == 0:
+            if i == 0:
+                pass
+            elif i % 9 == 0:
                 output += "\n"
+                if i % 27 == 0:
+                    output += "-" * ((max_possibles + 1) * 9 + 1) + "\n"
+            elif i % 3 == 0:
+                output += "|"
             output += "".join(map(str, sorted(cell.possibles))).ljust(max_possibles + 1)
         return output
 
@@ -492,7 +498,7 @@ class NoRepeatsConstraint(Constraint):
         if start_snapshot != self.snapshot_possibles():
             print_msg(
                 "Pencil marks tell me that cells {} must be from {}.".format(
-                    ", ".join(map(str, all_cells), ", ".join(map(str, marks)))
+                    ", ".join(map(str, all_cells)), ", ".join(map(str, marks))
                 )
             )
 
@@ -771,3 +777,8 @@ class Cell:
                 to_remove.add(possible)
         if to_remove:
             self.remove_possibles(to_remove)
+
+    def manhattan_distance(self, other_cell):
+        return abs(self.coordinates[0] - other_cell.coordinates[0]) + abs(
+            self.coordinates[1] - other_cell.coordinates[1]
+        )

@@ -1,5 +1,8 @@
 import itertools
+from re import L
 from sudoku import Constraint, NoRepeatsConstraint
+
+import numpy as np
 
 
 class KillerCage(NoRepeatsConstraint):
@@ -417,6 +420,49 @@ class InternalSandwichConstraint(Constraint):
             elif in_sandwich and value in {1, 9}:
                 return current_sum != assignment[self.sum_cell]
 
+    def quick_update(self):
+        if len(self.sandwich_cells) <= 4:
+            self.sandwich_cells[0].possibles = {1, 9}
+            self.sandwich_cells[-1].possibles = {1, 9}
+
+
+class InternalAverageSandwichConstraint(Constraint):
+    def __init__(self, board, sum_cell, sandwich_cells):
+        super().__init__(board, [sum_cell] + sandwich_cells)
+        self.sum_cell = sum_cell
+        self.sandwich_cells = sorted(
+            sandwich_cells, key=lambda cell: cell.row + cell.column
+        )
+        self.name = "Sandwich {}: {}".format(self.sum_cell, self.sandwich_cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        if 1 not in assignment.values() or 9 not in assignment.values():
+            return True
+
+        in_sandwich = False
+        count_in_sandwich = 0
+        current_sum = 0
+        for cell in self.sandwich_cells:
+            value = assignment[cell]
+            if not in_sandwich and value in {1, 9}:
+                in_sandwich = True
+            elif in_sandwich and value not in {1, 9}:
+                current_sum += value
+                count_in_sandwich += 1
+            elif in_sandwich and value in {1, 9}:
+                return current_sum / count_in_sandwich != assignment[self.sum_cell]
+
+    def quick_update(self):
+        if len(self.sandwich_cells) <= 4:
+            self.sandwich_cells[0].possibles = {1, 9}
+            self.sandwich_cells[-1].possibles = {1, 9}
+
 
 class InternalXSumConstraint(Constraint):
     def __init__(self, board, sum_cell, summand_cells):
@@ -427,6 +473,34 @@ class InternalXSumConstraint(Constraint):
             key=lambda c: abs(c.row - sum_cell.row) + abs(c.column - sum_cell.column),
         )
         self.x_cell = self.summand_cells[0]
+        self.name = "X-sum {}: {}".format(self.sum_cell, self.summand_cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        current_sum = 0
+        for cell in self.summand_cells[: assignment[self.x_cell]]:
+            current_sum += assignment[cell]
+
+        return current_sum != assignment[self.sum_cell]
+
+    def quick_update(self):
+        self.x_cell.possibles = self.x_cell.possibles.intersection({2, 3})
+
+
+class InternalOffsetXSumConstraint(Constraint):
+    def __init__(self, board, sum_cell, summand_cells):
+        super().__init__(board, [sum_cell] + summand_cells)
+        self.sum_cell = sum_cell
+        self.summand_cells = sorted(
+            summand_cells,
+            key=lambda c: abs(c.row - sum_cell.row) + abs(c.column - sum_cell.column),
+        )
+        self.x_cell = self.summand_cells.pop(0)
         self.name = "X-sum {}: {}".format(self.sum_cell, self.summand_cells)
 
     def partial_assignment_invalid(self, assignment):
@@ -485,3 +559,126 @@ class InternalConsecutiveConstraint(Constraint):
         self.count_cell.possibles = self.count_cell.possibles.intersection(
             {i + 1 for i, _ in enumerate(self.subject_cells)}
         )
+
+
+class InternalUnorderedConsecutiveConstraint(Constraint):
+    def __init__(self, board, count_cell, subject_cells):
+        super().__init__(board, [count_cell] + subject_cells)
+        self.count_cell = count_cell
+        self.subject_cells = sorted(
+            subject_cells,
+            key=lambda c: abs(c.row - count_cell.row)
+            + abs(c.column - count_cell.column),
+        )
+        self.name = "Unordered consecutive {}: {}".format(
+            self.count_cell, self.subject_cells
+        )
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        max_run = 0
+        current_run = 0
+        previous_cell_value = None
+        for value in sorted([assignment[cell] for cell in self.subject_cells]):
+            if previous_cell_value is None or abs(value - previous_cell_value) == 1:
+                current_run += 1
+                if current_run > max_run:
+                    max_run = current_run
+            else:
+                current_run = 1
+            previous_cell_value = value
+
+        return max_run != assignment[self.count_cell]
+
+    def quick_update(self):
+        self.count_cell.possibles = self.count_cell.possibles.intersection(
+            {i + 1 for i, _ in enumerate(self.subject_cells)}
+        )
+
+
+class InternalLittleKiller(Constraint):
+    def __init__(self, board, sum_cell, direction_indicator_cells):
+        unnormalised_direction = np.array(sum_cell.coordinates) - np.array(
+            direction_indicator_cells[0].coordinates
+        )
+        direction = (
+            unnormalised_direction // np.linalg.norm(unnormalised_direction)
+        ).astype(int)
+
+        d1 = direction.copy()
+        d1[d1 == 0] = 1
+
+        d2 = direction.copy()
+        d2[d2 == 0] = -1
+
+        def generate_diagonal(d):
+            diagonal = []
+            current_cell = (np.array(sum_cell.coordinates) + d).astype(int)
+            while all(i not in current_cell for i in {0, 5, 10}):
+                diagonal.append(board[tuple(current_cell)])
+                current_cell += d
+            return diagonal
+
+        self.diagonal_1 = generate_diagonal(d1)
+        self.diagonal_2 = generate_diagonal(d2)
+        self.sum_cell = sum_cell
+
+        super().__init__(board, [sum_cell] + self.diagonal_1 + self.diagonal_2)
+        self.name = (
+            f"Internal Little Killer {sum_cell}: {self.diagonal_1} or {self.diagonal_2}"
+        )
+
+    def partial_assignment_invalid(self, assignment):
+        if self.sum_cell not in assignment:
+            return
+
+        if all([c in assignment for c in self.diagonal_1]) and self.diagonal_1:
+            diagonal_1_sum = sum([assignment[c] for c in self.diagonal_1])
+            diagonal_1_valid = diagonal_1_sum == assignment[self.sum_cell]
+        else:
+            diagonal_1_valid = True
+
+        if all([c in assignment for c in self.diagonal_2]) and self.diagonal_2:
+            diagonal_2_sum = sum([assignment[c] for c in self.diagonal_2])
+            diagonal_2_valid = diagonal_2_sum == assignment[self.sum_cell]
+        else:
+            diagonal_2_valid = True
+
+        if not diagonal_1_valid and not diagonal_2_valid:
+            return True
+
+
+class InternalNinesNeighbours(Constraint):
+    def __init__(self, board, sum_cell, subject_cells):
+        super().__init__(board, [sum_cell] + subject_cells)
+        self.sum_cell = sum_cell
+        self.subject_cells = subject_cells
+        self.name = "Nine's neighbours {}: {}".format(self.sum_cell, self.subject_cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        if 9 not in assignment.values():
+            return True
+
+        if assignment[self.sum_cell] == 9:
+            return True
+
+        nine_cell = [cell for cell in self.subject_cells if assignment[cell] == 9][0]
+        nine_neighbours = [
+            cell
+            for cell in self.subject_cells
+            if cell.manhattan_distance(nine_cell) == 1
+        ]
+        nine_neighbours_sum = 9 - sum([assignment[cell] for cell in nine_neighbours])
+
+        return nine_neighbours_sum != assignment[self.sum_cell]
