@@ -37,7 +37,7 @@ class CellsEqual(Constraint):
     def quick_update(self):
         possibles = set.intersection(*[cell.possibles for cell in self.cells])
         for cell in self.cells:
-            cell.possibles = {i for i in possibles}
+            cell.intersect_possibles({i for i in possibles})
 
 
 class DisjointGroup(NoRepeatsConstraint):
@@ -56,9 +56,7 @@ class DisjointGroups:
 class GermanWhisper(Constraint):
     def __init__(self, board, cells):
         super().__init__(board, cells)
-        self.name = "German Whisper {}".format(
-            min(cells, key=lambda cell: cell.coordinates)
-        )
+        self.name = "German Whisper {}".format(cells)
 
     def partial_assignment_invalid(self, assignment):
         if super().partial_assignment_invalid(assignment):
@@ -385,7 +383,7 @@ class InternalSkyscraperConstraint(Constraint):
         return should_be_visible != are_visible
 
     def quick_update(self):
-        self.visibility_cell.possibles = self.visibility_cell.possibles.intersection(
+        self.visibility_cell.intersect_possibles(
             {i + 1 for i, _ in enumerate(self.skyscraper_cells)}
         )
 
@@ -422,8 +420,45 @@ class InternalSandwichConstraint(Constraint):
 
     def quick_update(self):
         if len(self.sandwich_cells) <= 4:
-            self.sandwich_cells[0].possibles = {1, 9}
-            self.sandwich_cells[-1].possibles = {1, 9}
+            self.sandwich_cells[0].intersect_possibles({1, 9})
+            self.sandwich_cells[-1].intersect_possibles({1, 9})
+
+
+class InternalSandwichDifferenceConstraint(Constraint):
+    def __init__(self, board, sum_cell, sandwich_cells):
+        super().__init__(board, [sum_cell] + sandwich_cells)
+        self.sum_cell = sum_cell
+        self.sandwich_cells = sorted(
+            sandwich_cells, key=lambda cell: cell.row + cell.column
+        )
+        self.name = "Difference Sandwich {}: {}".format(
+            self.sum_cell, self.sandwich_cells
+        )
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        if 1 not in assignment.values() or 9 not in assignment.values():
+            return True
+
+        in_sandwich = False
+        current_sum = 0
+        for cell in self.sandwich_cells:
+            value = assignment[cell]
+            if not in_sandwich and value in {1, 9}:
+                in_sandwich = True
+            elif in_sandwich and value not in {1, 9}:
+                current_sum += value
+            elif in_sandwich and value in {1, 9}:
+                return 10 - current_sum != assignment[self.sum_cell]
+
+    def quick_update(self):
+        self.add_corner_mark(1, self.sandwich_cells)
+        self.add_corner_mark(9, self.sandwich_cells)
 
 
 class InternalAverageSandwichConstraint(Constraint):
@@ -460,8 +495,8 @@ class InternalAverageSandwichConstraint(Constraint):
 
     def quick_update(self):
         if len(self.sandwich_cells) <= 4:
-            self.sandwich_cells[0].possibles = {1, 9}
-            self.sandwich_cells[-1].possibles = {1, 9}
+            self.sandwich_cells[0].intersect_possibles({1, 9})
+            self.sandwich_cells[-1].intersect_possibles({1, 9})
 
 
 class InternalXSumConstraint(Constraint):
@@ -489,7 +524,71 @@ class InternalXSumConstraint(Constraint):
         return current_sum != assignment[self.sum_cell]
 
     def quick_update(self):
-        self.x_cell.possibles = self.x_cell.possibles.intersection({2, 3})
+        self.x_cell.intersect_possibles({2, 3})
+
+
+class InternalXMaxConstraint(Constraint):
+    def __init__(self, board, max_cell, summand_cells):
+        super().__init__(board, [max_cell] + summand_cells)
+        self.max_cell = max_cell
+        self.summand_cells = sorted(
+            summand_cells,
+            key=lambda c: abs(c.row - max_cell.row) + abs(c.column - max_cell.column),
+        )
+        self.x_cell = self.summand_cells[0]
+        self.name = "X-max {}: {}".format(self.max_cell, self.summand_cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        return (
+            max(
+                [
+                    assignment[cell]
+                    for cell in self.summand_cells[: assignment[self.x_cell]]
+                ]
+            )
+            >= assignment[self.max_cell]
+        )
+
+    def quick_update(self):
+        self.x_cell.intersect_possibles({1, 2, 3, 4})
+
+
+class InternalXCountConstraint(Constraint):
+    def __init__(self, board, max_cell, summand_cells):
+        super().__init__(board, [max_cell] + summand_cells)
+        self.max_cell = max_cell
+        self.summand_cells = sorted(
+            summand_cells,
+            key=lambda c: abs(c.row - max_cell.row) + abs(c.column - max_cell.column),
+        )
+        self.x_cell = self.summand_cells[0]
+        self.name = "X-count {}: {}".format(self.max_cell, self.summand_cells)
+
+    def partial_assignment_invalid(self, assignment):
+        if len(assignment) != len(self.cells):
+            return None
+
+        if len(set(assignment.values())) != len(self.cells):
+            return True
+
+        return (
+            sum(
+                [
+                    assignment[cell] < assignment[self.max_cell]
+                    for cell in self.summand_cells
+                ]
+            )
+            != assignment[self.x_cell]
+        )
+
+    def quick_update(self):
+        self.x_cell.intersect_possibles({1, 2, 3, 4})
 
 
 class InternalOffsetXSumConstraint(Constraint):
@@ -517,7 +616,7 @@ class InternalOffsetXSumConstraint(Constraint):
         return current_sum != assignment[self.sum_cell]
 
     def quick_update(self):
-        self.x_cell.possibles = self.x_cell.possibles.intersection({2, 3})
+        self.x_cell.intersect_possibles({2, 3})
 
 
 class InternalConsecutiveConstraint(Constraint):
@@ -556,7 +655,7 @@ class InternalConsecutiveConstraint(Constraint):
         return max_run != assignment[self.count_cell]
 
     def quick_update(self):
-        self.count_cell.possibles = self.count_cell.possibles.intersection(
+        self.count_cell.intersect_possibles(
             {i + 1 for i, _ in enumerate(self.subject_cells)}
         )
 
@@ -596,7 +695,7 @@ class InternalUnorderedConsecutiveConstraint(Constraint):
         return max_run != assignment[self.count_cell]
 
     def quick_update(self):
-        self.count_cell.possibles = self.count_cell.possibles.intersection(
+        self.count_cell.intersect_possibles(
             {i + 1 for i, _ in enumerate(self.subject_cells)}
         )
 
@@ -682,3 +781,6 @@ class InternalNinesNeighbours(Constraint):
         nine_neighbours_sum = 9 - sum([assignment[cell] for cell in nine_neighbours])
 
         return nine_neighbours_sum != assignment[self.sum_cell]
+
+    def quick_update(self):
+        self.add_corner_mark(9, self.subject_cells)

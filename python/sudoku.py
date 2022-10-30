@@ -1,4 +1,4 @@
-from collections import deque, Counter
+from collections import Counter, defaultdict, deque
 from copy import deepcopy
 import io
 import itertools
@@ -12,6 +12,7 @@ from tqdm import tqdm as tq
 
 ALL_POSSIBLE_ASSIGNMENTS_LIMIT = 1e5 + 1
 BIFURCATION_LIMIT = 1e5
+MAX_BIFURCATION_LEVEL = 1
 N_TUPLE_NAMES = {
     1: "single",
     2: "pair",
@@ -54,6 +55,10 @@ class MultipleSolutionsFound(Exception):
     pass
 
 
+class NoBifurcationsLeft(Exception):
+    pass
+
+
 class Board:
     def __init__(self):
         self.cells = []
@@ -67,12 +72,19 @@ class Board:
             Column(self, i)
             Box(self, i)
 
+        self.forcing_values = nx.DiGraph()
+        self.forcing_values.add_nodes_from(
+            [(cell, value) for cell in self.cells for value in cell.possibles]
+        )
+
         self.unfinalised_cells = set(self.cells)
         self.constraints_to_check = deque()
-        self.unbifurcated_cells = set(self.cells)
+        self.attempted_bifurcations = set()
         self.end_after_bifurcation = True
         self.solution_snapshots = set()
         self.known_pairs = set()
+        self.bifurcation_level = 0
+        self.previous_bifurcation = None
 
     def __getitem__(self, item):
         return self.get_cell(*item)
@@ -103,18 +115,16 @@ class Board:
         self.known_pairs.add((c2, c1))
 
     def solve(self):
+        self._initialise_seen_graph()
+
         for constraint in sorted(self.constraints, key=lambda c: len(c.cells)):
             self.constraints_to_check.append(constraint)
-            constraint.initialise_seen_graph()
-            constraint.initialise_possibles()
+            constraint.initialise()
 
         self.process_constraint_queue()
 
-    def process_constraint_queue(self, constraint_limit=None, on_bifurcation=False):
+    def process_constraint_queue(self, constraint_limit=None):
         with tq(total=self.total_possibles, disable=True) as bar:
-            constraints_processed = 0
-            last_changed = 0
-            constraints_count = 0
             while self.unfinalised_cells:
                 while self.constraints_to_check:
                     start_snapshot = self.snapshot()
@@ -128,41 +138,21 @@ class Board:
                             sum([len(cell) for cell in start_snapshot])
                             - sum([len(cell) for cell in end_snapshot])
                         )
-                        last_changed = constraints_count
-                    else:
-                        if constraints_count - last_changed > len(self.constraints):
-                            break
-                    constraints_count += 1
 
-                    if constraint_limit is not None:
-                        if board_changed:
-                            constraints_processed += 1
-                            if (
-                                not (constraint_limit is None)
-                                and constraints_processed > constraint_limit
-                            ):
-                                print_msg(
-                                    "No contradiction or solution discovered within {} deductions".format(
-                                        constraint_limit
-                                    )
-                                )
-                                break
+                if self.quick_bifurcation_check():
+                    continue
 
                 if not self.unfinalised_cells:
                     break
 
-                if not on_bifurcation:
-                    while self.unbifurcated_cells:
-                        bifurcation_successful = self.bifurcate()
-                        if bifurcation_successful:
-                            break
-
-                    if (not self.unbifurcated_cells) and (
-                        not self.end_after_bifurcation
-                    ):
-                        self.unbifurcated_cells = {
-                            cell for cell in self.cells if not cell.finalised
-                        }
+                if self.bifurcation_level < MAX_BIFURCATION_LEVEL:
+                    try:
+                        while True:
+                            bifurcation_successful = self.bifurcate()
+                            if bifurcation_successful:
+                                break
+                    except NoBifurcationsLeft:
+                        self.attempted_bifurcations = set()
                         self.constraints_to_check.extend(self.constraints)
                         self.end_after_bifurcation = True
 
@@ -191,6 +181,24 @@ class Board:
                 )
             )
 
+    def quick_bifurcation_check(self):
+        to_remove = []
+        for cell, value in self.forcing_values:
+            out_component = list(nx.bfs_tree(self.forcing_values, (cell, value)))
+            induced_seen_subgraph = self.contradiction_graph.subgraph(out_component)
+            if induced_seen_subgraph.edges():
+                to_remove.append((cell, value))
+                print_msg(
+                    "Assigning {} = {} leads to contradictions: {}. Removing this assignment.".format(
+                        cell, value, list(induced_seen_subgraph.edges())
+                    )
+                )
+
+        for cell, value in to_remove:
+            cell.remove_possible(value)
+
+        return bool(to_remove)
+
     def final_constraint_check(self):
         for constraint in self.constraints:
             constraint.check()
@@ -199,93 +207,125 @@ class Board:
         return self.__repr__()
 
     def bifurcate(self):
+        try:
+            target_cell, target_value = self._select_bifurcation_target()
+
+        except ValueError:
+            raise NoSolutionFound("All bifurcations exhausted, no solution found.")
+
+        before_snapshot = self.snapshot()
+        self._bifurcate_on_cell_and_value(target_cell, target_value)
+        return self.snapshot() != before_snapshot
+
+    def common_constraints(self, cells):
+        for constraint in self.constraints:
+            if all([cell in constraint.cells for cell in cells]):
+                yield constraint
+
+    def _bifurcate_on_cell_and_value(self, cell, value):
         _stdout = sys.stdout
         bifurcation_stdout = io.StringIO()
-        sys.stdout = bifurcation_stdout
-
         global msg_indent
-        bifurcation_target = min(
-            self.unbifurcated_cells,
-            key=lambda cell: (
-                len(cell.possibles),
-                -cell.bifurcation_score,
-            ),
-        )
-        for pair in self.known_pairs:
-            if bifurcation_target in pair:
-                other_cell = min([cell for cell in pair if cell != bifurcation_target])
-                if other_cell in self.unbifurcated_cells:
-                    self.unbifurcated_cells.remove(other_cell)
+        out_component = list(nx.bfs_tree(self.forcing_values, (cell, value)))
 
+        sys.stdout = bifurcation_stdout
         print_msg(
-            "Bifurcating on {} ({}, {} bifurcations left)".format(
-                bifurcation_target,
-                bifurcation_target.possibles,
-                len(self.unbifurcated_cells),
+            "Bifurcating on {} = {}".format(
+                cell,
+                value,
             )
         )
-        to_remove = set()
-        self.unbifurcated_cells.remove(bifurcation_target)
+        self.attempted_bifurcations.add((cell, value))
+
         msg_indent += 1
-        for possible in bifurcation_target.possibles:
-            possible_stdout = io.StringIO()
-            sys.stdout = possible_stdout
-            print_msg("Bifurcating on {}".format(possible), indent_override=0)
-            new_board = deepcopy(self)
-            try:
-                GivenDigit(
-                    new_board,
-                    bifurcation_target.row,
-                    bifurcation_target.column,
-                    possible,
-                )
-                new_board.constraints_to_check.extend(
-                    new_board.get_cell(
-                        bifurcation_target.row, bifurcation_target.column
-                    ).constraints
-                )
-                new_board.process_constraint_queue(
-                    constraint_limit=BIFURCATION_LIMIT, on_bifurcation=True
-                )
-                self.final_constraint_check()
-                self.add_solution_snapshot(new_board)
-                sys.stdout = bifurcation_stdout
-                print(possible_stdout.getvalue())
 
-            except SudokuContradiction as e:
-                print_msg("Contradiction: {}".format(e))
-                print_msg(
-                    "Contradiction found, {} eliminated for {}".format(
-                        possible, bifurcation_target
-                    ),
-                    indent_override=0,
-                )
-                to_remove.add(possible)
-                sys.stdout = bifurcation_stdout
-                print(possible_stdout.getvalue())
-
-            except NoSolutionFound as e:
-                print_msg(
-                    "No contradiction or solution found for {} = {}".format(
-                        bifurcation_target, possible
+        new_board = deepcopy(self)
+        new_board.bifurcation_level = self.bifurcation_level + 1
+        new_given_digits = []
+        try:
+            for forced_cell, forced_value in out_component:
+                new_given_digits.append(
+                    GivenDigit(
+                        new_board,
+                        forced_cell.row,
+                        forced_cell.column,
+                        forced_value,
                     )
                 )
-            finally:
-                sys.stdout = bifurcation_stdout
+            new_board.constraints_to_check.extend(
+                new_board.get_cell(cell.row, cell.column).constraints
+            )
+            new_board.constraints_to_check.extend(
+                new_board.get_cell(cell.row, cell.column).constraints
+            )
+            new_board.process_constraint_queue()
+            self.final_constraint_check()  # Solution found if we get to this bit
+            self.add_solution_snapshot(new_board)
+            sys.stdout = bifurcation_stdout
+            print(bifurcation_stdout.getvalue())
+
+        except SudokuContradiction as e:
+            print_msg(
+                "Contradiction found: {}. {} eliminated for {}".format(e, value, cell),
+                indent_override=0,
+            )
+            sys.stdout = _stdout
+            print(bifurcation_stdout.getvalue())
+            sys.stdout.flush()
+            cell.remove_possibles([value])
+            self.constraints_to_check.extend(cell.constraints)
+
+        except NoSolutionFound as e:
+            print_msg(
+                "No contradiction or solution found for {} = {}".format(cell, value)
+            )
 
         msg_indent -= 1
-        bifurcation_successful = len(to_remove) > 0
 
         sys.stdout = _stdout
 
-        if bifurcation_successful:
-            print(bifurcation_stdout.getvalue())
-            sys.stdout.flush()
-            bifurcation_target.remove_possibles(to_remove)
-            self.constraints_to_check.extend(bifurcation_target.constraints)
-            self.end_after_bifurcation = False
+    def _initialise_seen_graph(self):
+        self.seen_graph = nx.Graph()
+        for cell in self.cells:
+            self.seen_graph.add_node(cell)
 
-        return bifurcation_successful
+        for c1, c2 in itertools.combinations(self.cells, 2):
+            common_constraints = [
+                constraint
+                for constraint in c1.constraints
+                if constraint in c2.constraints
+                and issubclass(type(constraint), NoRepeatsConstraint)
+            ]
+            if len(common_constraints) > 0:
+                self.seen_graph.add_edge(c1, c2)
+
+        self.contradiction_graph = nx.Graph()
+        for cell in self.cells:
+            self.contradiction_graph.add_node(cell)
+
+        for c1, c2 in self.seen_graph.edges():
+            for value in range(1, 10):
+                self.contradiction_graph.add_edge((c1, value), (c2, value))
+
+        for cell in self.cells:
+            for v1, v2 in itertools.combinations(range(1, 10), 2):
+                self.contradiction_graph.add_edge((cell, v1), (cell, v2))
+
+    def _select_bifurcation_target(self):
+        possible_targets = {}
+        for cell in self.cells:
+            if len(cell.possibles) == 1:
+                continue
+            for value in cell.possibles:
+                target = (cell, value)
+                if target in self.attempted_bifurcations:
+                    continue
+                possible_targets[target] = len(nx.bfs_tree(self.forcing_values, target))
+
+        return max(
+            possible_targets,
+            key=possible_targets.get,
+        )
 
 
 class Constraint:
@@ -297,27 +337,11 @@ class Constraint:
         board.constraints.append(self)
         self.corner_marks = {}
 
-    def initialise_seen_graph(self):
-        self.seen_graph = nx.Graph()
-        for cell in self.cells:
-            self.seen_graph.add_node(cell)
-
-        for c1, c2 in itertools.combinations(self.cells, 2):
-            if c1 == c2:
-                continue
-            common_constraints = [
-                constraint
-                for constraint in c1.constraints
-                if constraint in c2.constraints
-                if issubclass(type(constraint), NoRepeatsConstraint)
-            ]
-            if len(common_constraints) > 0:
-                self.seen_graph.add_edge(c1, c2)
-
     def add_corner_mark(self, digit, cells):
         """
         Returns True if any possibilities have changed as a result of this pencil mark
         """
+        print_msg("Adding {} corner mark to {} in {}".format(digit, cells, self))
         start_snapshot = self.snapshot_possibles()
         self.corner_marks[digit] = cells
         self.process_corner_mark(digit, cells)
@@ -335,11 +359,53 @@ class Constraint:
         """
         Assignment is a dict of Cells to values, returns a boolean showing if this is valid
         """
-        for c1, c2 in self.seen_graph.edges():
-            if assignment.get(c1, "C1 not there") == assignment.get(c2, "C2 not there"):
+        for c1, c2 in itertools.combinations(self.cells, 2):
+            if c1 in self.board.seen_graph[c2] and assignment.get(
+                c1, "C1 absent"
+            ) == assignment.get(c2, "C2 absent"):
                 return True
 
         return self.assignment_violates_corner_marks(assignment)
+
+    def update_all_corner_marks(self, cell):
+        for digit, cells in self.corner_marks.items():
+            if cell not in cells:
+                continue
+
+            if digit not in cell.possibles:
+                cells.remove(cell)
+
+            if len(cells) == 1:
+                if len(cells[0].possibles) > 1:
+                    print_msg(
+                        "The {} in {} can only go in {}".format(digit, self, cells[0])
+                    )
+                cells[0].intersect_possibles(
+                    {
+                        digit,
+                    }
+                )
+                self.board.constraints_to_check.appendleft(cells[0].finalise_constraint)
+            elif len(cells) == 2:
+                c1, c2 = cells
+                for value in c1.possibles:
+                    if value != digit:
+                        self.board.forcing_values.add_edge((c1, value), (c2, digit))
+
+                for value in c2.possibles:
+                    if value != digit:
+                        self.board.forcing_values.add_edge((c2, value), (c1, digit))
+
+            # Check if other constraints' pencil marks need
+            # updating.
+            for constraint in self.board.common_constraints(cells):
+                if constraint is self:
+                    continue
+                if not isinstance(constraint, NoRepeatsConstraint):
+                    continue
+                for cell in constraint.cells:
+                    if cell not in cells and digit in cell.possibles:
+                        cell.remove_possible(digit)
 
     def check(self):
         start_snapshot = self.snapshot_possibles()
@@ -358,13 +424,15 @@ class Constraint:
             # )
             if start_snapshot != end_snapshot:
                 print_msg("Change detected checking {}".format(self.name))
-                for cell, cell_start_snapshot, cell_end_snapshot in zip(
-                    self.cells, start_snapshot, end_snapshot
-                ):
-                    if cell_end_snapshot != cell_start_snapshot:
-                        self.board.constraints_to_check.extend(cell.constraints)
+                for cell in self.cells:
+                    print_msg(
+                        "  New possibles for {} are {}".format(cell, cell.possibles)
+                    )
                 return True
+
             return False
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
             print_msg(
                 "Exception raised checking {}:\n\n {}".format(self.name, format_exc())
@@ -377,7 +445,7 @@ class Constraint:
     def process_corner_mark(self, digit, cells):
         pass
 
-    def initialise_possibles(self):
+    def initialise(self):
         for cell in self.cells:
             valid_possibles = set()
             for possible in cell.possibles:
@@ -386,6 +454,36 @@ class Constraint:
             cell.intersect_possibles(valid_possibles)
 
     def update_possibles(self):
+        all_possible_assignments = self.get_all_possible_assignments()
+        if all_possible_assignments is None:
+            return
+        for cell in self.cells:
+            possibles = set()
+            possibles.update(
+                (assignment_dict[cell] for assignment_dict in all_possible_assignments)
+            )
+            cell.intersect_possibles(possibles)
+
+        # Note cell values that force other cell values
+        dependency_graph = nx.Graph()
+        for assignment in all_possible_assignments:
+            for a1, a2 in itertools.combinations(assignment.items(), 2):
+                if len(a1[0].possibles) == 1 or len(a2[0].possibles) == 1:
+                    continue
+                dependency_graph.add_edge(a1, a2)
+
+        for c1, c2 in itertools.combinations(self.cells, 2):
+            c1_nodes = [(c1, p) for p in c1.possibles]
+            c2_nodes = [(c2, p) for p in c2.possibles]
+            subgraph = dependency_graph.subgraph(c1_nodes + c2_nodes)
+            forcing_nodes = [v for v in subgraph if subgraph.degree(v) == 1]
+            forced_edges = [(v, list(subgraph[v])[0]) for v in forcing_nodes]
+            self.board.forcing_values.add_edges_from(forced_edges)
+
+        never_co_occur_graph = nx.complement(dependency_graph)
+        self.board.contradiction_graph.add_edges_from(never_co_occur_graph.edges())
+
+    def get_all_possible_assignments(self):
         possibles_for_cells = [cell.possibles for cell in self.cells]
         if (
             np.prod([len(possibles) for possibles in possibles_for_cells])
@@ -425,18 +523,16 @@ class Constraint:
                 )
             )
 
-        for cell in self.cells:
-            possibles = set()
-            possibles.update(
-                (assignment_dict[cell] for assignment_dict in all_possible_assignments)
-            )
-            cell.intersect_possibles(possibles)
+        return all_possible_assignments
 
     def snapshot_possibles(self):
         return tuple([cell.snapshot_possibles() for cell in self.cells])
 
     def __repr__(self):
         return self.name
+
+    def __hash__(self):
+        return hash(self.name)
 
 
 class FinaliseConstraint(Constraint):
@@ -457,20 +553,16 @@ class NoRepeatsConstraint(Constraint):
         super().__init__(board, cells)
         self.tuples_noted = set()
 
-    def initialise_seen_graph(self):
-        self.seen_graph = nx.Graph()
-        for cell in self.cells:
-            self.seen_graph.add_node(cell)
-
     def partial_assignment_invalid(self, assignment):
         output = len(set(assignment.values())) != len(assignment)
         return output
 
+    def initialise(self):
+        super().initialise()
+        self._initialise_corner_marks()
+
     def process_check(self):
         self.remove_finalised()
-
-        for digit in range(1, 10):
-            self.detect_corner_marks(digit)
 
         for n in range(1, 9 - len([cell for cell in self.cells if cell.finalised])):
             self.check_for_corner_mark_tuples(n)
@@ -488,19 +580,18 @@ class NoRepeatsConstraint(Constraint):
         if len(self.corner_marks) <= n:
             return
 
-        start_snapshot = self.snapshot_possibles()
         for marks in itertools.combinations(self.corner_marks, n):
             all_cells = {cell for mark in marks for cell in self.corner_marks[mark]}
             if len(all_cells) <= n:
+                start_snapshot = self.snapshot_possibles()
                 for cell in all_cells:
                     cell.intersect_possibles(marks)
-
-        if start_snapshot != self.snapshot_possibles():
-            print_msg(
-                "Pencil marks tell me that cells {} must be from {}.".format(
-                    ", ".join(map(str, all_cells)), ", ".join(map(str, marks))
-                )
-            )
+                if start_snapshot != self.snapshot_possibles():
+                    print_msg(
+                        "Pencil marks tell me that cells {} must be from {}.".format(
+                            ", ".join(map(str, all_cells)), ", ".join(map(str, marks))
+                        )
+                    )
 
     def detect_and_action_n_tuples(self, n):
         """
@@ -571,69 +662,37 @@ class NoRepeatsConstraint(Constraint):
         if len(to_note) == 2:
             self.board.known_pairs.add(to_note)
 
-    def detect_corner_marks(self, digit):
+    def _initialise_corner_marks(self):
         if len(self.cells) < 9:
             return
-        possible_cells = [
-            cell
-            for cell in self.cells
-            if digit in cell.possibles and not cell.finalised
-        ]
-        if len(possible_cells) == 1:
-            possible_cells[0].possibles = {
-                digit,
-            }
-            print_msg(
-                "The {} in {} can only go in {}".format(digit, self, possible_cells[0])
-            )
-            self.board.constraints_to_check.appendleft(
-                possible_cells[0].finalise_constraint
-            )
-            return
 
-        constraints = Counter(
-            (constraint for cell in possible_cells for constraint in cell.constraints)
-        )
-        common_constraints = [
-            constraint
-            for constraint, count in constraints.items()
-            if count == len(possible_cells) and constraint != self
-        ]
-        if not common_constraints:
-            return
-        cells_to_edit = []
-
-        # Capture print output from pencil marks (we want to explain the deduction before presenting to the user)
-        stdout = sys.stdout
-        changelog = io.StringIO()
-        sys.stdout = changelog
-        changed = False
-        try:
-            if common_constraints:
-                for constraint in common_constraints:
-                    changed = changed or constraint.add_corner_mark(
-                        digit, possible_cells
-                    )
-        finally:
-            sys.stdout = stdout
-
-        if changed:
-            print_msg(
-                "The {} in {} must go in one of {}".format(
-                    digit, self, ", ".join(map(str, possible_cells))
-                )
-            )
-            change_string = changelog.getvalue().strip()
-            if change_string:
-                print_msg(change_string)
-
-            for cell in cells_to_edit:
-                cell.remove_possible(digit)
+        for digit in range(1, 10):
+            cells = [cell for cell in self.cells if digit in cell.possibles]
+            self.corner_marks[digit] = cells
 
     def process_corner_mark(self, digit, cells):
         for cell in self.cells:
             if cell not in cells:
                 cell.remove_possible(digit)
+
+    def update_possibles(self):
+        super().update_possibles()
+        all_possible_assignments = (
+            self.get_all_possible_assignments()
+        )  # TODO caching on this
+        if all_possible_assignments is None:
+            return
+        digit_counts = defaultdict(int)
+        for assignment in all_possible_assignments:
+            for digit in set(assignment.values()):
+                digit_counts[digit] += 1
+
+        for digit, count in digit_counts.items():
+            if count == len(all_possible_assignments):
+                if digit not in self.corner_marks:
+                    self.add_corner_mark(
+                        digit, [cell for cell in self.cells if digit in cell.possibles]
+                    )
 
 
 class Row(NoRepeatsConstraint):
@@ -671,12 +730,14 @@ class GivenDigit(Constraint):
         return False
 
     def finalise_cell(self):
-        self.cells[0].possibles = {
-            self.digit,
-        }
+        self.cells[0].intersect_possibles(
+            {
+                self.digit,
+            }
+        )
         self.cells[0].finalise()
         for constraint in self.cells[0].constraints:
-            if type(constraint) in [Row, Column, Box]:
+            if isinstance(constraint, NoRepeatsConstraint):
                 constraint.remove_finalised()
 
 
@@ -688,13 +749,13 @@ class Cell:
         self.box = get_box(row, column)
         self.finalised = False
 
-        self.possibles = set(range(1, 10))
+        self._possibles = set(range(1, 10))
         self.constraints = []
         self.board.cells.append(self)
         self.finalise_constraint = FinaliseConstraint(board, self)
 
     def __repr__(self):
-        return "R{}C{}".format(self.row, self.column, self.possibles)
+        return "R{}C{}".format(self.row, self.column)
 
     def __hash__(self):
         if not hasattr(self, "id"):
@@ -708,10 +769,10 @@ class Cell:
         if self.finalised:
             return
         assert (
-            len(self.possibles) == 1
+            len(self._possibles) == 1
         ), "Error: attempting to finalise a cell that can still take two values!"
 
-        self.value = min(self.possibles)
+        self.value = min(self._possibles)
         if not any([type(constraint) is GivenDigit for constraint in self.constraints]):
             print_msg("Finalising {} as {}".format(self, self.value))
         self.finalised = True
@@ -721,11 +782,11 @@ class Cell:
                 constraint.remove_finalised()
 
         self.board.unfinalised_cells.remove(self)
-        if self in self.board.unbifurcated_cells:
-            self.board.unbifurcated_cells.remove(self)
+        nodes_to_remove = [v for v in self.board.forcing_values if v[0] == self]
+        self.board.forcing_values.remove_nodes_from(nodes_to_remove)
 
     def remove_possible(self, value):
-        if value not in self.possibles:
+        if value not in self._possibles:
             return
         self.remove_possibles([value])
 
@@ -733,16 +794,32 @@ class Cell:
         if self.finalised:
             return
 
-        for value in values:
-            if value in self.possibles:
-                self.possibles.remove(value)
-                if len(self.possibles) == 0:
-                    raise SudokuContradiction("No values left in {}".format(self))
-                if len(self.possibles) == 1:
-                    self.board.constraints_to_check.appendleft(self.finalise_constraint)
+        to_remove = {value for value in values if value in self._possibles}
+
+        for value in to_remove:
+            self._possibles.remove(value)
+
+            if (self, value) in self.board.forcing_values:
+                self.board.forcing_values.remove_node((self, value))
+
+            if len(self._possibles) == 0:
+                raise SudokuContradiction("No values left in {}".format(self))
+            if len(self._possibles) == 1:
+                self.board.constraints_to_check.appendleft(self.finalise_constraint)
+
+        if to_remove:
+            for constraint in self.constraints:
+                if constraint not in self.board.constraints_to_check:
+                    self.board.constraints_to_check.append(constraint)
+
+                constraint.update_all_corner_marks(self)
 
     def snapshot_possibles(self):
-        return tuple(sorted({i for i in self.possibles}))
+        return tuple(sorted({i for i in self._possibles}))
+
+    @property
+    def possibles(self):
+        return self._possibles
 
     @property
     def coordinates(self):
@@ -766,13 +843,13 @@ class Cell:
             for cell in constraint.cells
             if issubclass(type(constraint), NoRepeatsConstraint)
             and not cell.finalised
-            and cell.possibles.intersection(self.possibles)
+            and cell.possibles.intersection(self._possibles)
         }
         return sum([1 / len(cell.possibles) ** 3 for cell in cells_sharing_constraint])
 
     def intersect_possibles(self, others):
         to_remove = set()
-        for possible in self.possibles:
+        for possible in self._possibles:
             if possible not in others:
                 to_remove.add(possible)
         if to_remove:
